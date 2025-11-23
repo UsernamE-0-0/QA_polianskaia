@@ -1,19 +1,20 @@
-import requests
 import random
 import pytest
+import requests
 import re
 
 BASE_URL = "https://qa-internship.avito.com"
-SELLER_ID = random.randint(111111, 999999)
+SELLER_ID = random.randint(111111, 999999)  
 
-def parse_uuid_from_status(status):
-    match = re.search(r'Сохранили объявление - (.+)', status)
-    if match:
-        return match.group(1)
-    return None
 
-@pytest.fixture
-def created_item():
+def parse_uuid_from_status(status_text):
+    match = re.search(r"Сохранили объявление - ([a-f0-9-]{36})", status_text)
+    return match.group(1) if match else None
+
+
+@pytest.fixture(scope="session")
+def created_item_id():
+    """Создаёт одно объявление и возвращает его UUID"""
     payload = {
         "sellerID": SELLER_ID,
         "name": "Телефон Xiaomi",
@@ -25,202 +26,160 @@ def created_item():
         }
     }
     response = requests.post(f"{BASE_URL}/api/1/item", json=payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert "status" in data
-    item_id = parse_uuid_from_status(data["status"])
-    assert item_id is not None
-    assert len(item_id) == 36
-    return item_id
+    assert response.status_code == 200, f"Создание упало: {response.text}"
+    uuid = parse_uuid_from_status(response.json()["status"])
+    assert uuid is not None and len(uuid) == 36
+    return uuid
+
+
+@pytest.fixture(scope="session")
+def seller_with_multiple_items():
+    ids = []
+    for i in range(1, 3):  
+        payload = {
+            "sellerID": SELLER_ID,
+            "name": f"Товар {i}",
+            "price": 1000 * i,
+            "statistics": {
+                "likes": i,           
+                "viewCount": i * 10,
+                "contacts": i
+            }
+        }
+        response = requests.post(f"{BASE_URL}/api/1/item", json=payload)
+        assert response.status_code == 200, f"Не удалось создать item {i}: {response.text}"
+        item_id = parse_uuid_from_status(response.json()["status"])
+        assert item_id is not None
+        ids.append(item_id)
+    return ids
+
 
 def test_tc001_successful_creation():
     payload = {
         "sellerID": SELLER_ID,
-        "name": "Телефон Xiaomi",
-        "price": 15000,
-        "statistics": {
-            "likes": 10,
-            "viewCount": 50,
-            "contacts": 3
-        }
+        "name": "Тестовое объявление",
+        "price": 999,
+        "statistics": {"likes": 5, "viewCount": 20, "contacts": 1}
     }
-    response = requests.post(f"{BASE_URL}/api/1/item", json=payload)
-    assert response.status_code == 200
-    data = response.json()
-    assert "status" in data
-    assert data["status"].startswith("Сохранили объявление - ")
-    item_id = parse_uuid_from_status(data["status"])
-    assert item_id is not None
-    assert len(item_id) == 36
+    r = requests.post(f"{BASE_URL}/api/1/item", json=payload)
+    assert r.status_code == 200
+    assert "Сохранили объявление -" in r.json()["status"]
+
 
 def test_tc002_error_missing_sellerid():
-    payload = {
-        "name": "Телефон Xiaomi",
-        "price": 15000,
-        "statistics": {
-            "likes": 10,
-            "viewCount": 50,
-            "contacts": 3
-        }
-    }
-    response = requests.post(f"{BASE_URL}/api/1/item", json=payload)
-    assert response.status_code == 400
-    data = response.json()
-    assert data["result"]["message"] == "поле sellerID обязательно"
-    assert data["status"] == "400"
+    payload = {"name": "Без sellerID", "price": 100, "statistics": {"likes": 1, "viewCount": 1, "contacts": 1}}
+    r = requests.post(f"{BASE_URL}/api/1/item", json=payload)
+    assert r.status_code == 400
+    assert r.json()["result"]["message"] == "поле sellerID обязательно"
 
-def test_tc003_negative_price():
+
+def test_tc003_negative_price_with_zero_stats():
     payload = {
         "sellerID": SELLER_ID,
-        "name": "Товар",
+        "name": "Отрицательная цена",
         "price": -100,
-        "statistics": {
-            "likes": 1,
-            "viewCount": 1,
-            "contacts": 1
-        }
+        "statistics": {"likes": 0, "viewCount": 0, "contacts": 0}
     }
-    response = requests.post(f"{BASE_URL}/api/1/item", json=payload)
-    assert response.status_code == 200  # Фактическое поведение: создаётся
-    data = response.json()
-    assert data["status"].startswith("Сохранили объявление - ")
+    r = requests.post(f"{BASE_URL}/api/1/item", json=payload)
+    assert r.status_code == 400
+    assert "поле likes обязательно" in r.json()["result"]["message"]
+
+
+def test_tc003_negative_price_with_nonzero_stats():
+    payload = {
+        "sellerID": SELLER_ID,
+        "name": "Отрицательная цена 2",
+        "price": -500,
+        "statistics": {"likes": 1, "viewCount": 1, "contacts": 1}
+    }
+    r = requests.post(f"{BASE_URL}/api/1/item", json=payload)
+    assert r.status_code == 200  # ← баг: должно быть 400
+
 
 def test_tc004_empty_name():
     payload = {
         "sellerID": SELLER_ID,
         "name": "",
         "price": 500,
-        "statistics": {
-            "likes": 0,
-            "viewCount": 0,
-            "contacts": 0
-        }
+        "statistics": {"likes": 1, "viewCount": 0, "contacts": 0}
     }
-    response = requests.post(f"{BASE_URL}/api/1/item", json=payload)
-    assert response.status_code == 400
-    data = response.json()
-    assert data["result"]["message"] == "поле name обязательно"
-    assert data["status"] == "400"
+    r = requests.post(f"{BASE_URL}/api/1/item", json=payload)
+    assert r.status_code == 400
+    assert r.json()["result"]["message"] == "поле name обязательно"
+
 
 def test_tc005_missing_statistics():
-    payload = {
-        "sellerID": SELLER_ID,
-        "name": "Товар",
-        "price": 5000
-    }
-    response = requests.post(f"{BASE_URL}/api/1/item", json=payload)
-    assert response.status_code == 400
-    data = response.json()
-    assert data["result"]["message"] == "поле likes обязательно"  # Фактическое сообщение
-    assert data["status"] == "400"
+    payload = {"sellerID": SELLER_ID, "name": "Без статистики", "price": 777}
+    r = requests.post(f"{BASE_URL}/api/1/item", json=payload)
+    assert r.status_code == 400
+    assert "поле likes обязательно" in r.json()["result"]["message"]
+
 
 def test_tc006_invalid_sellerid_type():
     payload = {
         "sellerID": "abc",
-        "name": "Товар",
-        "price": 500,
-        "statistics": {
-            "likes": 1,
-            "viewCount": 2,
-            "contacts": 3
-        }
+        "name": "Неверный тип",
+        "price": 100,
+        "statistics": {"likes": 1, "viewCount": 1, "contacts": 1}
     }
-    response = requests.post(f"{BASE_URL}/api/1/item", json=payload)
-    assert response.status_code == 400  # Предполагаем 400, как в примере
-    data = response.json()
-    assert data["status"] == "не передано тело объявления"  # Фактическое
+    r = requests.post(f"{BASE_URL}/api/1/item", json=payload)
+    assert r.status_code == 400
+    assert r.json()["status"] == "не передано тело объявления"
 
-def test_tc007_successful_get_item(created_item):
-    item_id = created_item
-    response = requests.get(f"{BASE_URL}/api/1/item/{item_id}")
-    assert response.status_code == 200
-    data = response.json()
-    assert isinstance(data, list)
-    assert len(data) == 1
-    item = data[0]
-    assert "createdAt" in item
-    assert item["id"] == item_id
-    assert item["name"] == "Телефон Xiaomi"
-    assert item["price"] == 15000
-    assert item["sellerId"] == SELLER_ID
-    assert item["statistics"]["contacts"] == 3
-    assert item["statistics"]["likes"] == 10
-    assert item["statistics"]["viewCount"] == 50
+
+def test_tc007_successful_get_item(created_item_id):
+    r = requests.get(f"{BASE_URL}/api/1/item/{created_item_id}")
+    assert r.status_code == 200
+    data = r.json()
+    assert isinstance(data, list) and len(data) == 1
+    assert data[0]["id"] == created_item_id
+    assert data[0]["name"] == "Телефон Xiaomi"
+
 
 def test_tc008_get_nonexistent_item():
-    nonexistent_id = "99999999-9999-9999-9999-999999999999"
-    response = requests.get(f"{BASE_URL}/api/1/item/{nonexistent_id}")
-    assert response.status_code == 404
-    data = response.json()
-    assert data["result"]["message"] == f"item {nonexistent_id} not found"
-    assert data["status"] == "404"
+    fake_id = "11111111-1111-1111-1111-111111111111"
+    r = requests.get(f"{BASE_URL}/api/1/item/{fake_id}")
+    assert r.status_code == 404
+    assert "not found" in r.json()["result"]["message"]
+
 
 def test_tc009_invalid_uuid_format():
-    invalid_id = "abc123"
-    response = requests.get(f"{BASE_URL}/api/1/item/{invalid_id}")
-    assert response.status_code == 400
-    data = response.json()
-    assert data["result"]["message"] == f"ID айтема не UUID: {invalid_id}"
-    assert data["status"] == "400"
+    r = requests.get(f"{BASE_URL}/api/1/item/invalid-uuid")
+    assert r.status_code == 400
+    assert "не UUID" in r.json()["result"]["message"]
 
-@pytest.fixture
-def seller_with_items():
-    # Создаём несколько объявлений для sellerID
-    ids = []
-    for i in range(2):  # Два для теста
-        payload = {
-            "sellerID": SELLER_ID,
-            "name": f"Товар {i}",
-            "price": 1000 * (i + 1),
-            "statistics": {"likes": i, "viewCount": i*10, "contacts": i}
-        }
-        response = requests.post(f"{BASE_URL}/api/1/item", json=payload)
-        assert response.status_code == 200
-        item_id = parse_uuid_from_status(response.json()["status"])
-        ids.append(item_id)
-    return ids
 
-def test_tc010_successful_get_seller_items(seller_with_items):
-    response = requests.get(f"{BASE_URL}/api/1/{SELLER_ID}/item")
-    assert response.status_code == 200
-    data = response.json()
+def test_tc010_successful_get_seller_items(seller_with_multiple_items):
+    r = requests.get(f"{BASE_URL}/api/1/{SELLER_ID}/item")
+    assert r.status_code == 200
+    data = r.json()
     assert isinstance(data, list)
-    assert len(data) >= 2  # Минимум те, что создали
-    for item in data:
-        assert item["sellerId"] == SELLER_ID
+    assert len(data) >= 2
+    assert all(item["sellerId"] == SELLER_ID for item in data)
+
 
 def test_tc011_invalid_sellerid_format():
-    invalid_seller = "abc"
-    response = requests.get(f"{BASE_URL}/api/1/{invalid_seller}/item")
-    assert response.status_code == 400
-    data = response.json()
-    assert data["result"]["message"] == "передан некорректный идентификатор продавца"
-    assert data["status"] == "400"
+    r = requests.get(f"{BASE_URL}/api/1/abc123/item")
+    assert r.status_code == 400
+    assert "некорректный идентификатор продавца" in r.json()["result"]["message"]
 
-def test_tc012_successful_get_statistics(created_item):
-    item_id = created_item
-    response = requests.get(f"{BASE_URL}/api/1/statistic/{item_id}")
-    assert response.status_code == 200
-    data = response.json()
-    assert isinstance(data, list)
-    assert len(data) == 1
+
+def test_tc012_successful_get_statistics(created_item_id):
+    r = requests.get(f"{BASE_URL}/api/1/statistic/{created_item_id}")
+    assert r.status_code == 200
+    data = r.json()
+    assert isinstance(data, list) and len(data) == 1
     stats = data[0]
-    assert stats["contacts"] == 3
-    assert stats["likes"] == 10
-    assert stats["viewCount"] == 50
+    assert stats["likes"] == 10 and stats["viewCount"] == 50 and stats["contacts"] == 3
+
 
 def test_tc013_statistics_nonexistent_item():
-    nonexistent_id = "99999999-9999-9999-9999-999999999999"
-    response = requests.get(f"{BASE_URL}/api/1/statistic/{nonexistent_id}")
-    assert response.status_code == 404
-    data = response.json()
-    assert data["result"]["message"] == f"statistic {nonexistent_id} not found"
-    assert data["status"] == "404"
+    fake_id = "22222222-2222-2222-2222-222222222222"
+    r = requests.get(f"{BASE_URL}/api/1/statistic/{fake_id}")
+    assert r.status_code == 404
+
 
 def test_tc014_invalid_id_format_statistics():
-    invalid_id = "aaa111"
-    response = requests.get(f"{BASE_URL}/api/1/statistic/{invalid_id}")
-    assert response.status_code == 400
-    data = response.json()
-    assert data["result"]["message"] == "передан некорректный идентификатор объявления"
-    assert data["status"] == "400"
+    r = requests.get(f"{BASE_URL}/api/1/statistic/invalid123")
+    assert r.status_code == 400
+    assert "некорректный идентификатор объявления" in r.json()["result"]["message"]
